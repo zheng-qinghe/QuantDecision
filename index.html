@@ -215,6 +215,23 @@
         }
 
         .importance-slider::-webkit-slider-thumb:hover { transform: scale(1.1); }
+        
+        /* 智能推荐样式 */
+        .smart-suggestion {
+            background: linear-gradient(135deg, #e8f4fd, #d4edda);
+            border: 1px solid #b8daff;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin: 15px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        
+        .smart-suggestion .suggestion-icon { font-size: 20px; }
+        .smart-suggestion .suggestion-text { flex: 1; font-size: 14px; }
+        .smart-suggestion strong { color: var(--primary-color); }
 
         .slider-value-display {
             text-align: center;
@@ -662,7 +679,8 @@
             ahpComparisons = {};
             for (let i = 0; i < factors.length; i++) {
                 for (let j = i + 1; j < factors.length; j++) {
-                    const key = `${factors[i].factorId}-${factors[j].factorId}`;
+                    // 使用 ::: 作为分隔符，避免与 factorId 中的 - 冲突
+                    const key = `${factors[i].factorId}:::${factors[j].factorId}`;
                     comparisonPairs.push({ f1: factors[i], f2: factors[j], key });
                     ahpComparisons[key] = 1; // 默认同等重要
                 }
@@ -703,6 +721,9 @@
 
             // 进度
             const progress = ((currentComparisonIndex + 1) / total * 100).toFixed(0);
+            
+            // 智能推荐：根据已完成的比较，推导当前比较的建议值
+            const suggestion = getSmartSuggestion(pair.f1, pair.f2);
 
             container.innerHTML = `
                 <div class="ahp-question-card">
@@ -723,6 +744,14 @@
                             <div class="factor-hint">右侧因子</div>
                         </div>
                     </div>
+
+                    ${suggestion ? `
+                    <div class="smart-suggestion" id="smartSuggestion">
+                        <span class="suggestion-icon">💡</span>
+                        <span class="suggestion-text">基于已完成的比较，推荐：<strong>${suggestion.text}</strong></span>
+                        <button class="btn btn-outline-primary btn-sm" onclick="applySuggestion(${suggestion.sliderValue})">采纳建议</button>
+                    </div>
+                    ` : ''}
 
                     <div class="slider-container">
                         <div class="slider-labels">
@@ -811,14 +840,100 @@
         }
 
         function getImportanceText(val) {
-            if (val === 1) return '同等重要';
+            // val 是 Math.abs(v)，范围 1-9
+            // 1 表示"稍微偏向某一边"，不是"同等重要"
             const texts = { 
-                2: '稍微重要', 3: '稍微重要', 
+                1: '稍微重要', 2: '稍微重要', 3: '稍微重要', 
                 4: '明显重要', 5: '明显重要',
                 6: '强烈重要', 7: '强烈重要', 
                 8: '极端重要', 9: '极端重要' 
             };
             return texts[val] || '更重要';
+        }
+
+        // ==================== 智能推荐功能 ====================
+        // 根据已完成的比较，推导当前比较的建议值
+        function getSmartSuggestion(f1, f2) {
+            // 构建临时的传递关系图
+            const relations = {};
+            
+            // 从已完成的比较中提取关系
+            comparisonPairs.slice(0, currentComparisonIndex).forEach(pair => {
+                const v = ahpComparisons[pair.key];
+                if (!relations[pair.f1.factorId]) relations[pair.f1.factorId] = {};
+                if (!relations[pair.f2.factorId]) relations[pair.f2.factorId] = {};
+                
+                // 记录 pair.f1 相对于 pair.f2 的重要性
+                relations[pair.f1.factorId][pair.f2.factorId] = v;
+                relations[pair.f2.factorId][pair.f1.factorId] = 1 / v;
+            });
+            
+            // 尝试找到 f1 和 f2 之间的传递路径
+            const path = findPath(f1.factorId, f2.factorId, relations, new Set());
+            
+            if (!path || path.length === 0) {
+                return null; // 无法推导
+            }
+            
+            // 计算推导值
+            let deducedValue = 1;
+            for (let i = 0; i < path.length - 1; i++) {
+                const from = path[i];
+                const to = path[i + 1];
+                if (relations[from] && relations[from][to]) {
+                    deducedValue *= relations[from][to];
+                }
+            }
+            
+            // 限制在合理范围内
+            deducedValue = Math.max(1/9, Math.min(9, deducedValue));
+            
+            // 转换为滑块值
+            let sliderValue, text;
+            if (deducedValue > 1) {
+                // f1 比 f2 重要
+                sliderValue = Math.round(deducedValue);
+                sliderValue = Math.max(1, Math.min(9, sliderValue));
+                sliderValue = -sliderValue; // 负值表示左边重要
+                text = `${f1.name} 比 ${f2.name} ${getImportanceText(Math.abs(sliderValue))}`;
+            } else if (deducedValue < 1) {
+                // f2 比 f1 重要
+                sliderValue = Math.round(1 / deducedValue);
+                sliderValue = Math.max(1, Math.min(9, sliderValue));
+                text = `${f2.name} 比 ${f1.name} ${getImportanceText(sliderValue)}`;
+            } else {
+                sliderValue = 0;
+                text = `两者同等重要`;
+            }
+            
+            return { sliderValue, text, deducedValue };
+        }
+        
+        // BFS查找传递路径
+        function findPath(from, to, relations, visited) {
+            if (from === to) return [from];
+            if (visited.has(from)) return null;
+            visited.add(from);
+            
+            if (relations[from]) {
+                for (const next of Object.keys(relations[from])) {
+                    const subPath = findPath(next, to, relations, new Set(visited));
+                    if (subPath) {
+                        return [from, ...subPath];
+                    }
+                }
+            }
+            return null;
+        }
+        
+        // 应用智能推荐
+        function applySuggestion(sliderValue) {
+            const slider = document.getElementById('importanceSlider');
+            if (slider) {
+                slider.value = sliderValue;
+                const pair = comparisonPairs[currentComparisonIndex];
+                updateSliderDisplay(pair.key, sliderValue, pair.f1.name, pair.f2.name);
+            }
         }
 
         function prevComparison() {
@@ -836,11 +951,28 @@
         }
 
         function finishAHP() {
-            calculateAHPWeights();
+            try {
+                console.log('开始AHP计算...');
+                console.log('因子数量:', factors.length);
+                console.log('比较对数量:', comparisonPairs.length);
+                console.log('当前比较索引:', currentComparisonIndex);
+                console.log('比较结果:', ahpComparisons);
+                
+                calculateAHPWeights();
+                console.log('AHP计算完成！');
+            } catch (error) {
+                console.error('AHP计算错误:', error);
+                showAlert('计算出错：' + error.message);
+            }
         }
 
         function calculateAHPWeights() {
             const n = factors.length;
+            
+            if (n < 2) {
+                showAlert('至少需要2个因子才能进行AHP计算！');
+                return;
+            }
             
             // 构建判断矩阵
             const matrix = {};
@@ -852,13 +984,13 @@
             });
 
             // 填充矩阵（根据两两比较结果）
-            for (let [key, value] of Object.entries(ahpComparisons)) {
-                const [id1, id2] = key.split('-');
-                // value > 1 表示 id1 比 id2 重要 value 倍
-                // value < 1 表示 id2 比 id1 重要 (1/value) 倍
+            // 确保所有比较对都有值，没有的话使用默认值1
+            comparisonPairs.forEach(pair => {
+                const value = ahpComparisons[pair.key] || 1;
+                const [id1, id2] = pair.key.split(':::');  // 使用 ::: 分隔符
                 matrix[id1][id2] = value;
                 matrix[id2][id1] = 1 / value;
-            }
+            });
 
             // 几何平均法计算权重
             const weights = [];
@@ -872,6 +1004,11 @@
 
             // 归一化
             const sum = weights.reduce((a, b) => a + b, 0);
+            if (sum === 0) {
+                showAlert('权重计算异常，请检查输入！');
+                return;
+            }
+            
             factors.forEach((f, i) => { 
                 f.weight = (weights[i] / sum) * 100; 
             });
@@ -891,26 +1028,134 @@
             const CR = n >= 3 ? CI / RI[n] : 0;
 
             // 显示结果
-            document.getElementById('ahpResultSection').classList.remove('hidden');
+            const resultSection = document.getElementById('ahpResultSection');
+            if (resultSection) {
+                resultSection.classList.remove('hidden');
+            }
             
             const weightsDisplay = document.getElementById('weightsDisplay');
-            weightsDisplay.innerHTML = factors.map(f => 
-                `<div style="display: inline-block; background: white; padding: 6px 12px; border-radius: 6px; margin: 4px;">
-                    <strong>${f.name}</strong>: <span style="color: var(--primary-color); font-weight: 700;">${f.weight.toFixed(1)}%</span>
-                </div>`
-            ).join('');
+            if (weightsDisplay) {
+                weightsDisplay.innerHTML = factors.map(f => 
+                    `<div style="display: inline-block; background: white; padding: 6px 12px; border-radius: 6px; margin: 4px;">
+                        <strong>${f.name}</strong>: <span style="color: var(--primary-color); font-weight: 700;">${f.weight.toFixed(1)}%</span>
+                    </div>`
+                ).join('');
+            }
 
             const checkEl = document.getElementById('consistencyCheck');
-            if (CR < 0.1) {
-                checkEl.className = 'consistency-check pass';
-                checkEl.innerHTML = `✓ 一致性检验通过：CR = ${CR.toFixed(4)} < 0.1，权重分配合理`;
-            } else {
-                checkEl.className = 'consistency-check fail';
-                checkEl.innerHTML = `⚠ 一致性检验：CR = ${CR.toFixed(4)}，建议重新调整比较结果`;
+            if (checkEl) {
+                if (CR < 0.1) {
+                    checkEl.className = 'consistency-check pass';
+                    checkEl.innerHTML = `✓ 一致性检验通过：CR = ${CR.toFixed(4)} < 0.1，权重分配合理`;
+                } else {
+                    checkEl.className = 'consistency-check fail';
+                    checkEl.innerHTML = `
+                        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                            <span>⚠ 一致性检验：CR = ${CR.toFixed(4)}，建议调整比较结果</span>
+                            <button class="btn btn-warning btn-sm" onclick="autoFixConsistency()">
+                                🔧 一键智能修正
+                            </button>
+                        </div>
+                        <div style="margin-top: 8px; font-size: 12px; opacity: 0.9;">
+                            提示：点击"一键智能修正"可自动调整比较值，使其通过一致性检验
+                        </div>
+                    `;
+                }
             }
 
             renderFactorList();
             updateAllPlanScoreInputs();
+            console.log('权重计算完成，结果已显示');
+        }
+        
+        // ==================== 一键智能修正 ====================
+        function autoFixConsistency() {
+            const n = factors.length;
+            if (n < 3) {
+                showAlert('因子数量不足，无需修正！');
+                return;
+            }
+            
+            // 构建当前判断矩阵
+            const matrix = {};
+            factors.forEach(fi => { 
+                matrix[fi.factorId] = {}; 
+                factors.forEach(fj => { 
+                    matrix[fi.factorId][fj.factorId] = 1; 
+                }); 
+            });
+            
+            comparisonPairs.forEach(pair => {
+                const value = ahpComparisons[pair.key] || 1;
+                const [id1, id2] = pair.key.split(':::');
+                matrix[id1][id2] = value;
+                matrix[id2][id1] = 1 / value;
+            });
+            
+            // 计算当前权重（几何平均法）
+            const weights = [];
+            factors.forEach(fi => {
+                let product = 1;
+                factors.forEach(fj => { 
+                    product *= matrix[fi.factorId][fj.factorId]; 
+                });
+                weights.push(Math.pow(product, 1 / n));
+            });
+            
+            const sum = weights.reduce((a, b) => a + b, 0);
+            const normalizedWeights = weights.map(w => w / sum);
+            
+            // 使用权重比构建完全一致的判断矩阵
+            // 完全一致矩阵：a_ij = w_i / w_j
+            const consistentMatrix = {};
+            factors.forEach((fi, i) => {
+                consistentMatrix[fi.factorId] = {};
+                factors.forEach((fj, j) => {
+                    consistentMatrix[fi.factorId][fj.factorId] = normalizedWeights[i] / normalizedWeights[j];
+                });
+            });
+            
+            // 更新比较值（取最接近的整数标度）
+            comparisonPairs.forEach(pair => {
+                const [id1, id2] = pair.key.split(':::');
+                let value = consistentMatrix[id1][id2];
+                
+                // 将精确值转换为最接近的Saaty标度值
+                let roundedValue;
+                if (value >= 1) {
+                    // 向上取整到最近的标度值
+                    const scales = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+                    let minDiff = Infinity;
+                    roundedValue = 1;
+                    scales.forEach(s => {
+                        const diff = Math.abs(value - s);
+                        if (diff < minDiff) {
+                            minDiff = diff;
+                            roundedValue = s;
+                        }
+                    });
+                } else {
+                    // value < 1，取倒数后再取整
+                    const invValue = 1 / value;
+                    const scales = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+                    let minDiff = Infinity;
+                    let roundedInv = 1;
+                    scales.forEach(s => {
+                        const diff = Math.abs(invValue - s);
+                        if (diff < minDiff) {
+                            minDiff = diff;
+                            roundedInv = s;
+                        }
+                    });
+                    roundedValue = 1 / roundedInv;
+                }
+                
+                ahpComparisons[pair.key] = roundedValue;
+            });
+            
+            // 重新计算并显示
+            showAlert('已自动调整比较值，请查看新的结果');
+            calculateAHPWeights();
         }
 
         // ==================== KR管理 ====================
